@@ -1,4 +1,4 @@
-// 多上游 AI 网关核心：Groq（需 Key）+ LLM7（可匿名），支持自动降级
+// 多上游 AI 网关核心：Groq / LLM7 / Kilo / NVIDIA，支持自动降级
 
 export const PROVIDERS = {
   groq: {
@@ -28,6 +28,39 @@ export const PROVIDERS = {
       'gpt-oss-20b': 'gpt-oss:20b',
       'gpt-oss': 'gpt-oss',
       'qwen': 'qwen3-235b'
+    }
+  },
+  kilo: {
+    id: 'kilo',
+    label: 'Kilo Gateway（匿名）',
+    base: 'https://api.kilo.ai/api/gateway',
+    keyEnv: 'KILO_API_KEY',
+    anonymous: true,
+    noAuth: true,            // 匿名通道不带 Authorization 头
+    requireFreeSuffix: true, // 免费模型 ID 必须带 :free
+    defaultModel: 'kilo-auto/free',
+    // 免费模型 ID 必须带 :free 后缀，未登记的通用名统一交给自动路由
+    models: {
+      'gpt-oss-120b': 'kilo-auto/free',
+      'gpt-oss-20b': 'kilo-auto/free',
+      'gpt-oss': 'kilo-auto/free',
+      'qwen': 'nvidia/nemotron-3-super-120b-a12b:free',
+      'nemotron': 'nvidia/nemotron-3-ultra-550b-a55b:free'
+    }
+  },
+  nvidia: {
+    id: 'nvidia',
+    label: 'NVIDIA NIM',
+    base: 'https://integrate.api.nvidia.com/v1',
+    keyEnv: 'NVIDIA_API_KEY',
+    anonymous: false,
+    defaultModel: 'openai/gpt-oss-20b',
+    models: {
+      'gpt-oss-120b': 'openai/gpt-oss-120b',
+      'gpt-oss-20b': 'openai/gpt-oss-20b',
+      'gpt-oss': 'openai/gpt-oss-120b',
+      'qwen': 'qwen/qwen3-235b-a22b',
+      'deepseek': 'deepseek-ai/deepseek-v4.1-flash'
     }
   }
 };
@@ -63,8 +96,10 @@ function hasGatewayKey(env) {
 }
 
 // 决定发往上游的 Authorization
+// 返回 null 表示完全不带该头（Kilo 匿名通道不接受 Bearer）
 function upstreamAuth(p, env, request) {
   if (env && env[p.keyEnv]) return `Bearer ${env[p.keyEnv]}`;
+  if (p.noAuth) return null;
   if (p.anonymous) return `Bearer ${p.placeholderKey || 'unused'}`;
   if (!hasGatewayKey(env)) return request.headers.get('Authorization') || ''; // 透传模式
   return ''; // 配了网关密码却没配上游 Key：该上游不可用
@@ -84,13 +119,15 @@ export function providerOrder(env, forced) {
     const list = String(raw).split(',').map(s => s.trim()).filter(s => PROVIDERS[s]);
     if (list.length) return list;
   }
-  return ['groq', 'llm7'];
+  return ['groq', 'llm7', 'kilo', 'nvidia'];
 }
 
 // 模型名翻译：同一别名在不同上游有不同 ID
 function mapModel(model, p) {
   if (!model) return model;
   if (p.models && p.models[model]) return p.models[model];
+  // Kilo 免费通道只认带 :free 的 ID，其他一律交给自动路由
+  if (p.requireFreeSuffix && !model.endsWith(':free')) return p.defaultModel;
   return model; // 未登记的模型原样透传
 }
 
@@ -209,7 +246,7 @@ export async function healthAll(env) {
     try {
       const headers = {};
       const auth = env && env[p.keyEnv] ? `Bearer ${env[p.keyEnv]}`
-                 : (p.anonymous ? `Bearer ${p.placeholderKey || 'unused'}` : '');
+                 : (p.noAuth ? null : (p.anonymous ? `Bearer ${p.placeholderKey || 'unused'}` : ''));
       if (auth) headers['Authorization'] = auth;
       const res = await fetch(p.base + '/models', { headers });
       const text = await res.text();
