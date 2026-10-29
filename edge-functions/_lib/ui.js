@@ -5,8 +5,10 @@ export function configStatus(env) {
   return {
     groqConfigured: !!(env && env.GROQ_API_KEY),
     llm7Configured: !!(env && env.LLM7_API_KEY),
+    kiloConfigured: !!(env && env.KILO_API_KEY),
+    nvidiaConfigured: !!(env && env.NVIDIA_API_KEY),
     accessProtected: !!(env && env.ACCESS_KEY),
-    order: (env && env.PROVIDER_ORDER) || 'groq,llm7'
+    order: (env && env.PROVIDER_ORDER) || 'groq,llm7,kilo,nvidia'
   };
 }
 
@@ -91,6 +93,10 @@ export function landingPage(origin, env) {
   const llm7State = s.llm7Configured
     ? '<span class="dot dot-on"></span>已配置 Key（60 次/分）'
     : '<span class="dot dot-anon"></span>匿名模式（10 次/分）';
+  const kiloState = '<span class="dot dot-anon"></span>匿名可用（200 次/小时）';
+  const nvidiaState = s.nvidiaConfigured
+    ? '<span class="dot dot-on"></span>已配置 Key（约 40 RPM）'
+    : '<span class="dot dot-off"></span>未配置（将跳过）';
   const guard = s.accessProtected
     ? '<span class="badge badge-ok">🔒 已启用访问密码</span>'
     : '<span class="badge badge-warn">⚠️ 未设密码，任何人可调用</span>';
@@ -98,7 +104,7 @@ export function landingPage(origin, env) {
   const body = `
 <header>
   <div class="logo">AI Gateway</div>
-  <div class="tagline">Groq + LLM7 双上游反向代理 · 自动降级 · OpenAI 协议兼容</div>
+  <div class="tagline">Groq · LLM7 · Kilo · NVIDIA 四上游反向代理 · 自动降级 · OpenAI 协议兼容</div>
   ${guard}
 </header>
 
@@ -108,6 +114,8 @@ export function landingPage(origin, env) {
     <tr><th>上游</th><th>状态</th><th>说明</th></tr>
     <tr><td><b>Groq</b></td><td>${groqState}</td><td>速度快，有地区封锁风险</td></tr>
     <tr><td><b>LLM7.io</b></td><td>${llm7State}</td><td>无需注册即可用，永久兜底</td></tr>
+    <tr><td><b>Kilo Gateway</b></td><td>${kiloState}</td><td>免密钥，19+ 个 <code>:free</code> 模型</td></tr>
+    <tr><td><b>NVIDIA NIM</b></td><td>${nvidiaState}</td><td>100+ 开源模型，需 Key</td></tr>
   </table>
   <div class="meta">
     <span>调度顺序：<code>${s.order}</code></span>
@@ -124,6 +132,8 @@ export function landingPage(origin, env) {
     <tr><td>GET</td><td><code>/v1/models</code></td><td>模型列表</td></tr>
     <tr><td>*</td><td><code>/groq/v1/*</code></td><td>强制走 Groq</td></tr>
     <tr><td>*</td><td><code>/llm7/v1/*</code></td><td>强制走 LLM7</td></tr>
+    <tr><td>*</td><td><code>/kilo/v1/*</code></td><td>强制走 Kilo</td></tr>
+    <tr><td>*</td><td><code>/nvidia/v1/*</code></td><td>强制走 NVIDIA</td></tr>
   </table>
   <div class="meta">
     <span>响应头 <code>X-Upstream-Provider</code> 告诉你实际由谁服务</span>
@@ -165,12 +175,14 @@ for chunk in resp:
 <div class="card">
   <h2>🧩 模型别名（自动按上游翻译）</h2>
   <table>
-    <tr><th>你填</th><th>Groq 实际</th><th>LLM7 实际</th></tr>
-    <tr><td><code>gpt-oss-120b</code></td><td><code>openai/gpt-oss-120b</code></td><td><code>gpt-oss</code></td></tr>
-    <tr><td><code>gpt-oss-20b</code></td><td><code>openai/gpt-oss-20b</code></td><td><code>gpt-oss:20b</code></td></tr>
-    <tr><td><code>qwen</code></td><td><code>qwen/qwen3.8-27b</code></td><td><code>qwen3-235b</code></td></tr>
+    <tr><th>你填</th><th>Groq</th><th>LLM7</th><th>Kilo</th><th>NVIDIA</th></tr>
+    <tr><td><code>gpt-oss-120b</code></td><td><code>openai/gpt-oss-120b</code></td><td><code>gpt-oss</code></td><td><code>kilo-auto/free</code></td><td><code>openai/gpt-oss-120b</code></td></tr>
+    <tr><td><code>gpt-oss-20b</code></td><td><code>openai/gpt-oss-20b</code></td><td><code>gpt-oss:20b</code></td><td><code>kilo-auto/free</code></td><td><code>openai/gpt-oss-20b</code></td></tr>
+    <tr><td><code>qwen</code></td><td><code>qwen/qwen3.8-27b</code></td><td><code>qwen3-235b</code></td><td><code>nemotron-3-super…:free</code></td><td><code>qwen/qwen3-235b-a22b</code></td></tr>
+    <tr><td><code>deepseek</code></td><td>—</td><td>—</td><td><code>kilo-auto/free</code></td><td><code>deepseek-ai/deepseek-v4.1-flash</code></td></tr>
   </table>
-  <div class="warn">Groq 的 <code>llama-3.3-70b-versatile</code>、<code>llama-3.1-8b-instant</code> 已于 2026-08-16 对免费档下架，填了会 404。</div>
+  <div class="warn">Groq 的 <code>llama-3.3-70b-versatile</code>、<code>llama-3.1-8b-instant</code> 已于 2026-08-16 对免费档下架，填了会 404。<br>
+  Kilo 免费档只认带 <code>:free</code> 后缀的 ID，其他模型名会自动回退到 <code>kilo-auto/free</code>。</div>
 </div>
 `;
 
@@ -208,6 +220,8 @@ export function testPage(origin, env) {
         <option value="/v1/chat/completions">/v1（自动选上游）</option>
         <option value="/groq/v1/chat/completions">/groq/v1（强制 Groq）</option>
         <option value="/llm7/v1/chat/completions">/llm7/v1（强制 LLM7）</option>
+        <option value="/kilo/v1/chat/completions">/kilo/v1（强制 Kilo）</option>
+        <option value="/nvidia/v1/chat/completions">/nvidia/v1（强制 NVIDIA）</option>
       </select>
     </div>
     <div class="field" style="margin-bottom:0">
