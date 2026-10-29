@@ -1,29 +1,34 @@
-// 兜底路由：把所有 /v1/* 请求转发到 Groq 对应路径
-// 例如 /v1/audio/transcriptions -> https://api.groq.com/openai/v1/audio/transcriptions
-// 已单独定义过的 /v1/chat/completions、/v1/models 优先命中各自文件，走不到这里
-import { proxy, checkAccess, jsonError, corsHeaders } from './_lib/groq.js';
+// 兜底路由：处理其余 /v1/* 以及带上游前缀的路径
+//   /v1/xxx            → 按 PROVIDER_ORDER 自动选，失败降级
+//   /groq/v1/xxx       → 强制 Groq
+//   /llm7/v1/xxx       → 强制 LLM7
+import { proxy, checkAccess, jsonError, corsHeaders } from './_lib/proxy.js';
 
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  if (request.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: corsHeaders() });
-  }
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders() });
 
-  if (!url.pathname.startsWith('/v1/')) {
+  let forced = null;
+  let path = url.pathname;
+
+  if (path.startsWith('/groq/v1/')) {
+    forced = 'groq';
+    path = path.slice('/groq/v1'.length);
+  } else if (path.startsWith('/llm7/v1/')) {
+    forced = 'llm7';
+    path = path.slice('/llm7/v1'.length);
+  } else if (path.startsWith('/v1/')) {
+    path = path.slice('/v1'.length);
+  } else {
     return jsonError(
-      '仅代理 /v1/* 路径。可用：GET /healthz（连通性自检）、GET /v1/models、POST /v1/chat/completions',
+      '路径不支持。可用：GET /healthz、/v1/*、/groq/v1/*、/llm7/v1/*',
       404,
       'not_found'
     );
   }
 
-  if (!checkAccess(request, env)) {
-    return jsonError('Unauthorized：ACCESS_KEY 不正确', 401, 'auth_error');
-  }
-
-  // /v1/xxx -> 上游 /xxx
-  const upstreamPath = url.pathname.slice('/v1'.length);
-  return proxy(request, env, upstreamPath);
+  if (!checkAccess(request, env)) return jsonError('Unauthorized：ACCESS_KEY 不正确', 401, 'auth_error');
+  return proxy(request, env, path, forced);
 }
