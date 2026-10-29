@@ -1,104 +1,108 @@
-# Groq 反向代理 (EdgeOne Pages 版)
+# AI 网关：Groq + LLM7 双上游反向代理
 
-把 Groq 官方 OpenAI 兼容接口套一层自己的网关：隐藏真实 API Key、统一入口、可加自己的访问密码。
+把两个 OpenAI 兼容接口合成一个网关：**隐藏真实 API Key、统一入口、自动降级**。
 
-- 上游：`https://api.groq.com/openai/v1`
-- 完全兼容 OpenAI SDK，改个 `base_url` 就能用
-- 支持 SSE 流式输出
-- 零依赖，纯原生 JS
+- **Groq** —— 官方，速度快，需 API Key
+- **LLM7.io** —— **可匿名使用（无需注册、无需 Key）**，作为永久兜底
+
+任何一个挂了，自动切另一个。两个都不用注册也能跑起来。
+
+| 能力 | 说明 |
+|---|---|
+| OpenAI 协议兼容 | 改个 `base_url` 就能用，SDK 无需改 |
+| SSE 流式透传 | 逐字输出，不被中间层缓冲 |
+| 自动降级 | 上游 4xx/5xx/网络错误自动切下一个 |
+| 模型名自动翻译 | `gpt-oss-120b` 在两个上游自动映射成各自 ID |
+| 隐藏真实 Key | 客户端只用你设的 `ACCESS_KEY` |
+| 零依赖 | 纯原生 JS，无 npm 包 |
 
 ---
 
-## ⚠️ 先读这段：地区封锁风险
+## ⚠️ 地区限制先看这里
 
-**Groq 明确封锁中国大陆 IP**，其接口架在 Cloudflare 上，对大陆出口 IP 直接返回 403，请求根本到不了鉴权那一步。
+**Groq 明确封锁中国大陆 IP**（接口架在 Cloudflare 上，对大陆出口 IP 返回 403）。
+EdgeOne 节点以国内/亚太为主，**有可能被拦**。
 
-EdgeOne 的节点以国内和亚太为主，**有可能同样被拦**。
+**LLM7.io 无此限制，且匿名可用** —— 这也是加它的最大意义：**保证网关永远有活路**。
 
-所以部署完**第一件事**是访问：
+部署后第一件事，访问：
 
 ```
 https://你的域名/healthz
 ```
 
-- 返回 `groq_reachable: true` → 能用，继续
-- 返回 `403` 或 `groq_reachable: false` → 当前节点被 Groq 封锁，反代不可用
-
-**如果被封，换 Cloudflare Workers**（海外节点，访问 Groq 无阻碍）。同目录下的 `cf-workers/` 是等价版本。
-
-> 你在美国加州，其实 Cloudflare Workers 才是更稳的选择。
+会同时探测两个上游，直接告诉你哪个能用。
 
 ---
 
-## 部署步骤
+## 快速开始（最省事：什么都不配）
 
-### 1. 准备 Groq API Key
-
-1. 打开 [console.groq.com](https://console.groq.com) 注册登录
-2. 进 API Keys 页面创建一个 Key（以 `gsk_` 开头）
-3. 复制保存
-
-免费额度（2026-10 现状，随时可能调整）：
-
-| 项目 | 限制 |
-|---|---|
-| 请求频率 | 30 次/分钟 |
-| 每日请求 | 约 14,400 次 |
-| Token | 8,000/分钟、200,000/天 |
-| 信用卡 | 不需要 |
-
-### 2. 部署到 EdgeOne Pages
-
-方式一 **Git 导入**：把本目录推到 GitHub 仓库 → EdgeOne Pages 控制台导入 → 自动识别 `edge-functions/`
-
-方式二 **CLI**：
+1. 部署本项目
+2. **一个环境变量都不用配**
+3. 直接调：
 
 ```bash
-npm i -g edgeone
-edgeone pages init
-edgeone pages deploy
+curl https://你的域名/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-oss-120b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### 3. 配置环境变量
+因为 LLM7 支持匿名，网关会用占位 Key 直接调通。Groq 因为没配 Key 会被跳过。
 
-EdgeOne Pages 控制台 → 你的项目 → **环境变量**，添加：
+---
 
-| 变量名 | 说明 | 是否必填 |
+## 环境变量
+
+| 变量名 | 说明 | 必填 |
 |---|---|---|
-| `GROQ_API_KEY` | 你的 Groq Key（`gsk_...`）。配了它，客户端就不用带真实 Key | 推荐 |
-| `ACCESS_KEY` | 你自己设的网关密码。配了它，客户端必须带这个才能调用 | 推荐 |
+| `GROQ_API_KEY` | Groq Key（`gsk_...`） | 否 |
+| `LLM7_API_KEY` | LLM7 token（可选，提速率用） | 否 |
+| `ACCESS_KEY` | 你的网关密码 | 否（推荐） |
+| `PROVIDER_ORDER` | 上游优先级，如 `llm7,groq` | 否，默认 `groq,llm7` |
 
-**两种用法，按需选：**
+**三种用法：**
 
-- **隐藏真实 Key**（推荐）：两个都配。客户端只带 `ACCESS_KEY`，真实 `gsk_` 永远不泄露。
-- **纯透传**：只配 `GROQ_API_KEY` 或都不配，客户端自己带 Groq Key。
+| 场景 | 怎么配 | 效果 |
+|---|---|---|
+| 零配置 | 都不配 | 走 LLM7 匿名，所有人都能调你的网关 |
+| 隐藏 Key（推荐） | 配 `GROQ_API_KEY` + `ACCESS_KEY` | 客户端只带 `ACCESS_KEY`，真实 Key 不泄露 |
+| 只要 LLM7 | 只配 `ACCESS_KEY` | Groq 跳过，LLM7 匿名兜底 |
 
-改完环境变量**必须重新部署**才生效。
+⚠️ 改完环境变量**必须重新部署**才生效。
+
+---
+
+## 路由
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/healthz` | 连通性自检（探测所有上游） |
+| * | `/v1/*` | 按 `PROVIDER_ORDER` 自动选，**失败自动降级** |
+| * | `/groq/v1/*` | 强制走 Groq |
+| * | `/llm7/v1/*` | 强制走 LLM7 |
+
+具体：`/v1/chat/completions`、`/v1/models`、`/groq/v1/models`、`/llm7/v1/chat/completions` ……
+
+响应头会带 `X-Upstream-Provider`，告诉你这条请求实际由谁服务；降级过的话带 `X-Fallback-Log`。
 
 ---
 
 ## 怎么用
 
-部署后你会拿到一个域名，比如 `xxx.edgeone.run`。
+**接口地址填：** `https://你的域名/v1`
 
-**接口地址填：**
-
-```
-https://xxx.edgeone.run/v1
-```
-
-**Python 示例：**
+**Python：**
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="你的 ACCESS_KEY",   # 或 Groq 真实 Key（透传模式）
-    base_url="https://xxx.edgeone.run/v1"
+    api_key="你的 ACCESS_KEY",   # 没配 ACCESS_KEY 就随便填，如 "unused"
+    base_url="https://你的域名/v1"
 )
 
 resp = client.chat.completions.create(
-    model="openai/gpt-oss-120b",
+    model="gpt-oss-120b",       # 通用别名，会自动按上游翻译
     messages=[{"role": "user", "content": "你好"}],
     stream=True
 )
@@ -106,33 +110,56 @@ for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-**curl 自检：**
-
-```bash
-curl https://xxx.edgeone.run/v1/chat/completions \
-  -H "Authorization: Bearer 你的ACCESS_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"hi"}]}'
-```
-
 **沉浸式翻译 / 其他客户端：**
-- API 端点：`https://xxx.edgeone.run/v1/chat/completions`
+- API 端点：`https://你的域名/v1/chat/completions`
 - 密钥：你的 `ACCESS_KEY`
-- 模型：`openai/gpt-oss-120b`
+- 模型：`gpt-oss-120b`
 
 ---
 
-## 当前可用模型（2026-10）
+## 模型别名
 
-| 模型 ID | 说明 |
-|---|---|
-| `openai/gpt-oss-120b` | 最强，500 tok/s |
-| `openai/gpt-oss-20b` | 轻量快，1000 tok/s |
-| `qwen/qwen3.8-27b` | 中文较好 |
-| `whisper-large-v3` | 语音转文字 |
+填通用别名，网关自动按上游翻译；不认识的 ID 原样透传。
 
-> `llama-3.3-70b-versatile`、`llama-3.1-8b-instant` 已于 2026-08-16 对免费档下架，别再填了。
-> 实时列表：`GET https://xxx.edgeone.run/v1/models`
+| 通用别名 | Groq 实际 ID | LLM7 实际 ID |
+|---|---|---|
+| `gpt-oss-120b` | `openai/gpt-oss-120b` | `gpt-oss` |
+| `gpt-oss-20b` | `openai/gpt-oss-20b` | `gpt-oss:20b` |
+| `qwen` | `qwen/qwen3.8-27b` | `qwen3-235b` |
+
+若上游返回 404（模型不存在），会自动用该上游的默认模型重试一次。
+
+> ⚠️ Groq 的 `llama-3.3-70b-versatile`、`llama-3.1-8b-instant` 已于 2026-08-16 对免费档下架。
+> 实时列表：`GET /v1/models`
+
+---
+
+## 额度参考（2026-10，随时可能变）
+
+| | Groq 免费档 | LLM7 匿名 | LLM7 免费 token |
+|---|---|---|---|
+| 每日 Token | — | 50万 | 100万 |
+| 速率 | 30次/分 | 10次/分 | 60次/分 |
+| 每小时 | — | 60次 | 250次 |
+| 注册 | 需邮箱 | **无需** | 邮箱即可 |
+
+LLM7 匿名档速率较低（10次/分钟），高频用建议去 `token.llm7.io` 领个免费 token 填进 `LLM7_API_KEY`。
+
+---
+
+## 部署（EdgeOne Pages）
+
+控制台 → 导入 Git 仓库 → 自动识别 `edge-functions/` 目录 → 配环境变量 → 部署。
+
+或用 CLI：
+
+```bash
+npm i -g edgeone
+edgeone pages init
+edgeone pages deploy
+```
+
+> 若 `/healthz` 显示 Groq 403 且你需要 Groq，改用 `cf-workers/` 部署到 Cloudflare Workers（海外节点无封锁）。
 
 ---
 
@@ -140,13 +167,14 @@ curl https://xxx.edgeone.run/v1/chat/completions \
 
 ```
 edge-functions/
-├── _lib/groq.js              # 共享转发库（不会暴露为路由）
-├── healthz.js                # GET  /healthz        连通性自检
+├── _lib/proxy.js                    # 核心：上游注册、降级、模型翻译
+├── healthz.js                       # GET  /healthz
+├── [[default]].js                   # 兜底：/v1/*、/groq/v1/*、/llm7/v1/*
 ├── v1/
-│   ├── models.js             # GET  /v1/models
-│   └── chat/
-│       └── completions.js    # POST /v1/chat/completions
-└── [[default]].js            # 兜底：其余 /v1/* 全转发
+│   ├── models.js                    # GET  /v1/models
+│   └── chat/completions.js          # POST /v1/chat/completions
+├── groq/v1/{models.js, chat/completions.js}     # 强制 Groq
+└── llm7/v1/{models.js, chat/completions.js}     # 强制 LLM7
 ```
 
 ---
@@ -155,9 +183,25 @@ edge-functions/
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
-| `/healthz` 返回 403 | 节点被 Groq 地区封锁 | 换 Cloudflare Workers |
-| 返回 401 | `ACCESS_KEY` 不对 | 检查请求头 `Authorization: Bearer xxx` |
-| 返回 502 带"无法连接" | 网络不通 | 同上 |
-| 返回 429 | 超 Groq 免费额度 | 等一分钟，或换模型 |
-| 模型 404 | 模型已下架 | 用 `/v1/models` 查实时列表 |
-| 改了环境变量没生效 | 未重新部署 | 重新部署一次 |
+| `/healthz` 里 groq 403 | Groq 地区封锁 | 换 Cloudflare Workers，或只用 LLM7 |
+| 两个都不通 | 节点网络受限 | 换平台部署 |
+| 返回 401 | `ACCESS_KEY` 不对 | 检查 `Authorization: Bearer xxx` |
+| 返回 429 | 超免费额度 | 等一分钟，或换上游 |
+| 响应头 `X-Upstream-Provider: llm7` | Groq 挂了已降级 | 正常，看 `X-Fallback-Log` 了解原因 |
+| 改了变量没生效 | 未重新部署 | 重新部署一次 |
+
+---
+
+## 关于 LLM7 的风险
+
+LLM7.io 是**英国个人运营的第三方聚合网关**（AGPL 开源），背后转接 Azure / Cloudflare / DeepSeek / Mistral / OpenAI 等。
+
+- 你的 prompt 会经过第三方，**别发敏感内容**
+- 它可因"滥用"**无通知停你的访问**
+- 声称的模型真实性无法完全核实
+
+适合个人折腾、原型开发、作为兜底；别押生产，别发隐私数据。
+
+---
+
+MIT License
