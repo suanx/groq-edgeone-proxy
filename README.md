@@ -1,11 +1,13 @@
-# AI 网关：Groq + LLM7 双上游反向代理
+# AI 网关：Groq · LLM7 · Kilo · NVIDIA 四上游反向代理
 
-把两个 OpenAI 兼容接口合成一个网关：**隐藏真实 API Key、统一入口、自动降级**。
+把四个 OpenAI 兼容接口合成一个网关：**隐藏真实 API Key、统一入口、自动降级**。
 
 - **Groq** —— 官方，速度快，需 API Key
-- **LLM7.io** —— **可匿名使用（无需注册、无需 Key）**，作为永久兜底
+- **LLM7.io** —— **可匿名使用**，永久兜底
+- **Kilo Gateway** —— **完全匿名，零注册**，19+ 个 `:free` 模型
+- **NVIDIA NIM** —— 100+ 开源模型，需 Key
 
-任何一个挂了，自动切另一个。两个都不用注册也能跑起来。
+任何一个挂了自动切下一个。完全不配置也能跑起来（Kilo / LLM7 匿名档）。
 
 | 能力 | 说明 |
 |---|---|
@@ -56,17 +58,21 @@ curl https://你的域名/v1/chat/completions \
 | 变量名 | 说明 | 必填 |
 |---|---|---|
 | `GROQ_API_KEY` | Groq Key（`gsk_...`） | 否 |
-| `LLM7_API_KEY` | LLM7 token（可选，提速率用） | 否 |
+| `LLM7_API_KEY` | LLM7 token（提速率用） | 否 |
+| `KILO_API_KEY` | Kilo Key（可选，匿名档已够用） | 否 |
+| `NVIDIA_API_KEY` | NVIDIA NIM Key（`nvapi-...`） | 否 |
 | `ACCESS_KEY` | 你的网关密码 | 否（推荐） |
-| `PROVIDER_ORDER` | 上游优先级，如 `llm7,groq` | 否，默认 `groq,llm7` |
+| `PROVIDER_ORDER` | 上游优先级，如 `kilo,llm7,groq,nvidia` | 否，默认 `groq,llm7,kilo,nvidia` |
 
-**三种用法：**
+**几种用法：**
 
 | 场景 | 怎么配 | 效果 |
 |---|---|---|
-| 零配置 | 都不配 | 走 LLM7 匿名，所有人都能调你的网关 |
-| 隐藏 Key（推荐） | 配 `GROQ_API_KEY` + `ACCESS_KEY` | 客户端只带 `ACCESS_KEY`，真实 Key 不泄露 |
-| 只要 LLM7 | 只配 `ACCESS_KEY` | Groq 跳过，LLM7 匿名兜底 |
+| 零配置 | 都不配 | Kilo + LLM7 匿名档直接可用 |
+| 隐藏 Key（推荐） | 配上游 Key + `ACCESS_KEY` | 客户端只带 `ACCESS_KEY`，真实 Key 不泄露 |
+| 只要匿名 | 只配 `ACCESS_KEY` | 走 Kilo + LLM7，无需任何注册 |
+
+> 未配置 Key 的上游会被自动跳过，不参与降级链。
 
 ⚠️ 改完环境变量**必须重新部署**才生效。
 
@@ -82,8 +88,10 @@ curl https://你的域名/v1/chat/completions \
 | * | `/v1/*` | 按 `PROVIDER_ORDER` 自动选，**失败自动降级** |
 | * | `/groq/v1/*` | 强制走 Groq |
 | * | `/llm7/v1/*` | 强制走 LLM7 |
+| * | `/kilo/v1/*` | 强制走 Kilo |
+| * | `/nvidia/v1/*` | 强制走 NVIDIA |
 
-具体：`/v1/chat/completions`、`/v1/models`、`/groq/v1/models`、`/llm7/v1/chat/completions` ……
+具体：`/v1/chat/completions`、`/v1/models`、`/kilo/v1/models`、`/nvidia/v1/chat/completions` ……
 
 响应头会带 `X-Upstream-Provider`，告诉你这条请求实际由谁服务；降级过的话带 `X-Fallback-Log`。
 
@@ -140,13 +148,18 @@ for chunk in resp:
 
 填通用别名，网关自动按上游翻译；不认识的 ID 原样透传。
 
-| 通用别名 | Groq 实际 ID | LLM7 实际 ID |
-|---|---|---|
-| `gpt-oss-120b` | `openai/gpt-oss-120b` | `gpt-oss` |
-| `gpt-oss-20b` | `openai/gpt-oss-20b` | `gpt-oss:20b` |
-| `qwen` | `qwen/qwen3.8-27b` | `qwen3-235b` |
+| 通用别名 | Groq | LLM7 | Kilo | NVIDIA |
+|---|---|---|---|---|
+| `gpt-oss-120b` | `openai/gpt-oss-120b` | `gpt-oss` | `kilo-auto/free` | `openai/gpt-oss-120b` |
+| `gpt-oss-20b` | `openai/gpt-oss-20b` | `gpt-oss:20b` | `kilo-auto/free` | `openai/gpt-oss-20b` |
+| `qwen` | `qwen/qwen3.8-27b` | `qwen3-235b` | `nvidia/nemotron-3-super-120b-a12b:free` | `qwen/qwen3-235b-a22b` |
+| `deepseek` | — | — | `kilo-auto/free` | `deepseek-ai/deepseek-v4.1-flash` |
+| `nemotron` | — | — | `nvidia/nemotron-3-ultra-550b-a55b:free` | — |
 
 若上游返回 404（模型不存在），会自动用该上游的默认模型重试一次。
+
+> **Kilo 特殊规则**：免费档只认带 `:free` 后缀的 ID。未登记的模型名会自动回退到 `kilo-auto/free`（自动路由）。
+> 想指定具体模型，直接填完整 ID，如 `nvidia/nemotron-3-ultra-550b-a55b:free`。
 
 > ⚠️ Groq 的 `llama-3.3-70b-versatile`、`llama-3.1-8b-instant` 已于 2026-08-16 对免费档下架。
 > 实时列表：`GET /v1/models`
@@ -155,12 +168,11 @@ for chunk in resp:
 
 ## 额度参考（2026-10，随时可能变）
 
-| | Groq 免费档 | LLM7 匿名 | LLM7 免费 token |
-|---|---|---|---|
-| 每日 Token | — | 50万 | 100万 |
-| 速率 | 30次/分 | 10次/分 | 60次/分 |
-| 每小时 | — | 60次 | 250次 |
-| 注册 | 需邮箱 | **无需** | 邮箱即可 |
+| | Groq 免费档 | LLM7 匿名 | LLM7 免费 token | Kilo 匿名 | NVIDIA 免费 |
+|---|---|---|---|---|---|
+| 速率 | 30次/分 | 10次/分 | 60次/分 | **200次/小时** | 约 40 RPM |
+| 每日 Token | 20万 | 50万 | 100万 | 未公布 | 1000 额度/月 |
+| 注册 | 需邮箱 | **无需** | 邮箱即可 | **无需** | 需邮箱+手机 |
 
 LLM7 匿名档速率较低（10次/分钟），高频用建议去 `token.llm7.io` 领个免费 token 填进 `LLM7_API_KEY`。
 
@@ -191,12 +203,17 @@ edge-functions/
 ├── index.js                         # GET  /        落地页
 ├── test.js                          # GET  /test    在线测试页
 ├── healthz.js                       # GET  /healthz 连通性自检
-├── [[default]].js                   # 兜底：/v1/*、/groq/v1/*、/llm7/v1/*
+├── [[default]].js                   # 兜底：/v1/*、/groq|llm7|kilo|nvidia/v1/*
 ├── v1/
 │   ├── models.js                    # GET  /v1/models
 │   └── chat/completions.js          # POST /v1/chat/completions
-├── groq/v1/{models.js, chat/completions.js}     # 强制 Groq
-└── llm7/v1/{models.js, chat/completions.js}     # 强制 LLM7
+├── groq/v1/{models.js, chat/completions.js}      # 强制 Groq
+├── llm7/v1/{models.js, chat/completions.js}      # 强制 LLM7
+├── kilo/v1/{models.js, chat/completions.js}      # 强制 Kilo
+└── nvidia/v1/{models.js, chat/completions.js}    # 强制 NVIDIA
+
+build/build-cf.js                    # 由 _lib/ 生成 cf-workers/worker.js（单一数据源）
+cf-workers/{worker.js, wrangler.toml}             # Cloudflare Workers 单文件版
 ```
 
 ---
