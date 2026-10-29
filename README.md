@@ -1,4 +1,4 @@
-# AI 网关：Groq + LLM7 双上游反向代理（Cloudflare Workers 版）
+# AI 网关：Groq · LLM7 · Kilo · NVIDIA 四上游反向代理（Cloudflare Workers 版）
 
 > 本分支是 Cloudflare Workers 专用版，文件已在根目录，Workers Git 集成直接选 **`cloudflare`** 分支即可。
 > EdgeOne Pages 版请看 `main` 分支。
@@ -6,9 +6,11 @@
 把两个 OpenAI 兼容接口合成一个网关：**隐藏真实 API Key、统一入口、自动降级**。
 
 - **Groq** —— 官方，速度快，需 API Key
-- **LLM7.io** —— **可匿名使用（无需注册、无需 Key）**，作为永久兜底
+- **LLM7.io** —— **可匿名使用**，永久兜底
+- **Kilo Gateway** —— **完全匿名，零注册**，19+ 个 `:free` 模型
+- **NVIDIA NIM** —— 100+ 开源模型，需 Key
 
-任何一个挂了，自动切另一个。**推荐用这个版本**：Workers 跑在海外节点，访问 Groq 无地区封锁。
+任何一个挂了自动切下一个。**推荐用这个版本**：Workers 跑在海外节点，访问 Groq / NVIDIA 无地区封锁。
 
 ---
 
@@ -57,9 +59,11 @@ Dashboard → 你的 Worker → Settings → **Variables and Secrets** → Add
 | 变量名 | 说明 | 必填 |
 |---|---|---|
 | `GROQ_API_KEY` | Groq Key（`gsk_...`） | 否 |
-| `LLM7_API_KEY` | LLM7 token（可选，提速率） | 否 |
+| `LLM7_API_KEY` | LLM7 token（提速率） | 否 |
+| `KILO_API_KEY` | Kilo Key（可选，匿名档已够用） | 否 |
+| `NVIDIA_API_KEY` | NVIDIA NIM Key（`nvapi-...`） | 否 |
 | `ACCESS_KEY` | 你的网关密码 | 否（推荐） |
-| `PROVIDER_ORDER` | 上游优先级，如 `llm7,groq` | 否，默认 `groq,llm7` |
+| `PROVIDER_ORDER` | 上游优先级，如 `kilo,llm7,groq,nvidia` | 否，默认 `groq,llm7,kilo,nvidia` |
 
 | 场景 | 怎么配 | 效果 |
 |---|---|---|
@@ -82,6 +86,8 @@ Dashboard → 你的 Worker → Settings → **Variables and Secrets** → Add
 | * | `/v1/*` | 自动选上游，**失败自动降级** |
 | * | `/groq/v1/*` | 强制走 Groq |
 | * | `/llm7/v1/*` | 强制走 LLM7 |
+| * | `/kilo/v1/*` | 强制走 Kilo |
+| * | `/nvidia/v1/*` | 强制走 NVIDIA |
 
 响应头 `X-Upstream-Provider` 告诉你实际由谁服务；降级过会带 `X-Fallback-Log`。
 
