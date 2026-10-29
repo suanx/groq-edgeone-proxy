@@ -76,7 +76,9 @@ curl https://你的域名/v1/chat/completions \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/healthz` | 连通性自检（探测所有上游） |
+| GET | `/` | **落地页**：上游状态、端点清单、快速开始代码 |
+| GET | `/test` | **在线测试页**：浏览器里直接发请求，看流式输出 |
+| GET | `/healthz` | 连通性自检（探测所有上游，JSON） |
 | * | `/v1/*` | 按 `PROVIDER_ORDER` 自动选，**失败自动降级** |
 | * | `/groq/v1/*` | 强制走 Groq |
 | * | `/llm7/v1/*` | 强制走 LLM7 |
@@ -84,6 +86,23 @@ curl https://你的域名/v1/chat/completions \
 具体：`/v1/chat/completions`、`/v1/models`、`/groq/v1/models`、`/llm7/v1/chat/completions` ……
 
 响应头会带 `X-Upstream-Provider`，告诉你这条请求实际由谁服务；降级过的话带 `X-Fallback-Log`。
+
+### 两个页面
+
+**落地页 `/`** —— 部署后直接打开域名就能看到：
+- 两个上游的配置状态（只显示"已配置/未配置"，**不会回显任何真实 Key**）
+- 当前调度顺序
+- 全部端点清单
+- 按你的域名自动生成的 Python / cURL 代码，一键复制
+- 沉浸式翻译等客户端的填表参数
+
+**测试页 `/test`** —— 不用装任何工具就能验证网关是否工作：
+- 填 Access Key（自动存 localStorage，下次不用重填）
+- 选模型、选端点（自动 / 强制 Groq / 强制 LLM7）
+- 流式 SSE 或非流式
+- 实时逐字显示输出，底部显示**这次请求命中的上游**、耗时、降级记录
+
+调试时优先用 `/test` 区分是"网关问题"还是"上游问题"：切到 `/llm7/v1` 单独测，就能排除 Groq 的干扰。
 
 ---
 
@@ -168,7 +187,10 @@ edgeone pages deploy
 ```
 edge-functions/
 ├── _lib/proxy.js                    # 核心：上游注册、降级、模型翻译
-├── healthz.js                       # GET  /healthz
+├── _lib/ui.js                       # 落地页 + 测试页 HTML
+├── index.js                         # GET  /        落地页
+├── test.js                          # GET  /test    在线测试页
+├── healthz.js                       # GET  /healthz 连通性自检
 ├── [[default]].js                   # 兜底：/v1/*、/groq/v1/*、/llm7/v1/*
 ├── v1/
 │   ├── models.js                    # GET  /v1/models
