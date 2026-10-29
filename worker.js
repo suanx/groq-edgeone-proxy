@@ -1,5 +1,8 @@
-// 多上游 AI 网关 —— Cloudflare Workers 单文件版
-// 上游：Groq（需 Key）+ LLM7.io（可匿名），自动降级
+// AI 网关 — Groq / LLM7 / Kilo / NVIDIA 四上游反向代理 (Cloudflare Workers 单文件版)
+// 本文件由 build/build-cf.js 自动生成，请勿手改；改 edge-functions/_lib/ 后重新构建
+// 海外节点，访问 Groq / NVIDIA 无地区封锁问题。
+
+// 多上游 AI 网关核心：Groq / LLM7 / Kilo / NVIDIA，支持自动降级
 
 const PROVIDERS = {
   groq: {
@@ -30,10 +33,43 @@ const PROVIDERS = {
       'gpt-oss': 'gpt-oss',
       'qwen': 'qwen3-235b'
     }
+  },
+  kilo: {
+    id: 'kilo',
+    label: 'Kilo Gateway（匿名）',
+    base: 'https://api.kilo.ai/api/gateway',
+    keyEnv: 'KILO_API_KEY',
+    anonymous: true,
+    noAuth: true,            // 匿名通道不带 Authorization 头
+    requireFreeSuffix: true, // 免费模型 ID 必须带 :free
+    defaultModel: 'kilo-auto/free',
+    // 免费模型 ID 必须带 :free 后缀，未登记的通用名统一交给自动路由
+    models: {
+      'gpt-oss-120b': 'kilo-auto/free',
+      'gpt-oss-20b': 'kilo-auto/free',
+      'gpt-oss': 'kilo-auto/free',
+      'qwen': 'nvidia/nemotron-3-super-120b-a12b:free',
+      'nemotron': 'nvidia/nemotron-3-ultra-550b-a55b:free'
+    }
+  },
+  nvidia: {
+    id: 'nvidia',
+    label: 'NVIDIA NIM',
+    base: 'https://integrate.api.nvidia.com/v1',
+    keyEnv: 'NVIDIA_API_KEY',
+    anonymous: false,
+    defaultModel: 'openai/gpt-oss-20b',
+    models: {
+      'gpt-oss-120b': 'openai/gpt-oss-120b',
+      'gpt-oss-20b': 'openai/gpt-oss-20b',
+      'gpt-oss': 'openai/gpt-oss-120b',
+      'qwen': 'qwen/qwen3-235b-a22b',
+      'deepseek': 'deepseek-ai/deepseek-v4.1-flash'
+    }
   }
 };
 
-// ---------- 工具 ----------
+// ---- 通用工具 ----
 
 function corsHeaders(extra = {}) {
   return {
@@ -52,27 +88,34 @@ function jsonError(message, status = 500, code = 'error', extraHeaders = {}) {
   );
 }
 
+// 网关自身访问密码：配了 ACCESS_KEY 才校验
 function checkAccess(request, env) {
   if (!env || !env.ACCESS_KEY) return true;
   const auth = request.headers.get('Authorization') || '';
   return auth === `Bearer ${env.ACCESS_KEY}`;
 }
 
-function hasGatewayKey(env) { return !!(env && env.ACCESS_KEY); }
+function hasGatewayKey(env) {
+  return !!(env && env.ACCESS_KEY);
+}
 
+// 决定发往上游的 Authorization
+// 返回 null 表示完全不带该头（Kilo 匿名通道不接受 Bearer）
 function upstreamAuth(p, env, request) {
   if (env && env[p.keyEnv]) return `Bearer ${env[p.keyEnv]}`;
+  if (p.noAuth) return null;
   if (p.anonymous) return `Bearer ${p.placeholderKey || 'unused'}`;
-  if (!hasGatewayKey(env)) return request.headers.get('Authorization') || '';
-  return '';
+  if (!hasGatewayKey(env)) return request.headers.get('Authorization') || ''; // 透传模式
+  return ''; // 配了网关密码却没配上游 Key：该上游不可用
 }
 
 function isAvailable(p, env) {
   if (env && env[p.keyEnv]) return true;
   if (p.anonymous) return true;
-  return !hasGatewayKey(env);
+  return !hasGatewayKey(env); // 透传模式可用
 }
 
+// 上游优先级
 function providerOrder(env, forced) {
   if (forced && PROVIDERS[forced]) return [forced];
   const raw = env && env.PROVIDER_ORDER;
@@ -80,13 +123,16 @@ function providerOrder(env, forced) {
     const list = String(raw).split(',').map(s => s.trim()).filter(s => PROVIDERS[s]);
     if (list.length) return list;
   }
-  return ['groq', 'llm7'];
+  return ['groq', 'llm7', 'kilo', 'nvidia'];
 }
 
+// 模型名翻译：同一别名在不同上游有不同 ID
 function mapModel(model, p) {
   if (!model) return model;
   if (p.models && p.models[model]) return p.models[model];
-  return model;
+  // Kilo 免费通道只认带 :free 的 ID，其他一律交给自动路由
+  if (p.requireFreeSuffix && !model.endsWith(':free')) return p.defaultModel;
+  return model; // 未登记的模型原样透传
 }
 
 const HOP = ['content-encoding', 'content-length', 'transfer-encoding', 'connection',
@@ -107,6 +153,7 @@ function buildOutHeaders(res, providerName, log) {
   return h;
 }
 
+// 单次尝试
 async function attempt(p, env, request, upstreamPath, bodyObj) {
   const headers = new Headers();
   for (const k of ['content-type', 'accept', 'accept-encoding', 'accept-language']) {
@@ -128,27 +175,30 @@ async function attempt(p, env, request, upstreamPath, bodyObj) {
   } catch (e) {
     return { ok: false, status: 0, error: String(e && e.message ? e.message : e) };
   }
-  if (res.ok) return { ok: true, status: res.status, res };
-
+  if (res.ok) {
+    return { ok: true, status: res.status, res };
+  }
+  // 失败时读一点响应体用于排错（非流式情况下才是 JSON）
   let detail = '';
   try {
     const ct = res.headers.get('content-type') || '';
     if (!ct.includes('event-stream') && !ct.includes('stream')) {
-      detail = (await res.text()).slice(0, 200);
+      const t = await res.text();
+      detail = t.slice(0, 200);
     }
   } catch (e) {}
   return { ok: false, status: res.status, error: detail || (`HTTP ${res.status}`), res };
 }
 
-// ---------- 带降级的转发 ----------
-
+// ---- 主入口：带降级的转发 ----
 async function proxy(request, env, upstreamPath, forced) {
+  // body 先读一次，后续重试复用
   let bodyObj = null;
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     try {
       const buf = await request.arrayBuffer();
       if (buf.byteLength) bodyObj = JSON.parse(new TextDecoder().decode(buf));
-    } catch (e) { /* 非 JSON，原样转发 */ }
+    } catch (e) { /* 非 JSON 请求，按原样转发 */ }
   }
 
   const order = providerOrder(env, forced);
@@ -160,15 +210,20 @@ async function proxy(request, env, upstreamPath, forced) {
       log.push({ provider: name, skipped: '未配置 Key' });
       continue;
     }
+
+    // 模型名按上游翻译
     const payload = bodyObj && bodyObj.model
       ? { ...bodyObj, model: mapModel(bodyObj.model, p) }
       : bodyObj;
 
     let r = await attempt(p, env, request, upstreamPath, payload);
+
+    // 模型不存在 → 用该上游的默认模型再试一次
     if (!r.ok && r.status === 404 && payload && payload.model && payload.model !== p.defaultModel) {
       log.push({ provider: name, status: 404, retryWith: p.defaultModel });
       r = await attempt(p, env, request, upstreamPath, { ...payload, model: p.defaultModel });
     }
+
     if (r.ok) {
       return new Response(r.res.body, {
         status: r.res.status,
@@ -183,10 +238,10 @@ async function proxy(request, env, upstreamPath, forced) {
   return jsonError(msg, 502, 'all_upstreams_failed', { 'X-Fallback-Log': safeHeader(JSON.stringify(log)) });
 }
 
-// ---------- 连通性自检 ----------
-
+// ---- 全部上游连通性自检 ----
 async function healthAll(env) {
-  const jobs = Object.keys(PROVIDERS).map(async (name) => {
+  const names = Object.keys(PROVIDERS);
+  const jobs = names.map(async (name) => {
     const p = PROVIDERS[name];
     const t0 = Date.now();
     if (!isAvailable(p, env)) {
@@ -195,13 +250,16 @@ async function healthAll(env) {
     try {
       const headers = {};
       const auth = env && env[p.keyEnv] ? `Bearer ${env[p.keyEnv]}`
-                 : (p.anonymous ? `Bearer ${p.placeholderKey || 'unused'}` : '');
+                 : (p.noAuth ? null : (p.anonymous ? `Bearer ${p.placeholderKey || 'unused'}` : ''));
       if (auth) headers['Authorization'] = auth;
       const res = await fetch(p.base + '/models', { headers });
       const text = await res.text();
       return {
-        provider: name, label: p.label, available: res.ok,
-        http_status: res.status, elapsed_ms: Date.now() - t0,
+        provider: name,
+        label: p.label,
+        available: res.ok,
+        http_status: res.status,
+        elapsed_ms: Date.now() - t0,
         note: res.ok ? '✅ 可用' : '❌ 不可用（多为地区封锁或 Key 无效）',
         body_preview: text.slice(0, 200)
       };
@@ -209,8 +267,8 @@ async function healthAll(env) {
       return { provider: name, label: p.label, available: false, error: String(e && e.message ? e.message : e), note: '❌ 连接异常' };
     }
   });
-  const details = await Promise.all(jobs);
-  const ok = details.filter(d => d.available).map(d => d.provider);
+  const results = await Promise.all(jobs);
+  const ok = results.filter(r => r.available).map(r => r.provider);
   return {
     any_available: ok.length > 0,
     working_providers: ok,
@@ -218,7 +276,7 @@ async function healthAll(env) {
     note: ok.length
       ? `✅ 可用上游：${ok.join(', ')}`
       : '❌ 无可用上游。LLM7 无需 Key 应始终可用；若它也失败，说明当前节点网络受限。',
-    details
+    details: results
   };
 }
 
@@ -229,8 +287,10 @@ function configStatus(env) {
   return {
     groqConfigured: !!(env && env.GROQ_API_KEY),
     llm7Configured: !!(env && env.LLM7_API_KEY),
+    kiloConfigured: !!(env && env.KILO_API_KEY),
+    nvidiaConfigured: !!(env && env.NVIDIA_API_KEY),
     accessProtected: !!(env && env.ACCESS_KEY),
-    order: (env && env.PROVIDER_ORDER) || 'groq,llm7'
+    order: (env && env.PROVIDER_ORDER) || 'groq,llm7,kilo,nvidia'
   };
 }
 
@@ -315,6 +375,10 @@ function landingPage(origin, env) {
   const llm7State = s.llm7Configured
     ? '<span class="dot dot-on"></span>已配置 Key（60 次/分）'
     : '<span class="dot dot-anon"></span>匿名模式（10 次/分）';
+  const kiloState = '<span class="dot dot-anon"></span>匿名可用（200 次/小时）';
+  const nvidiaState = s.nvidiaConfigured
+    ? '<span class="dot dot-on"></span>已配置 Key（约 40 RPM）'
+    : '<span class="dot dot-off"></span>未配置（将跳过）';
   const guard = s.accessProtected
     ? '<span class="badge badge-ok">🔒 已启用访问密码</span>'
     : '<span class="badge badge-warn">⚠️ 未设密码，任何人可调用</span>';
@@ -322,7 +386,7 @@ function landingPage(origin, env) {
   const body = `
 <header>
   <div class="logo">AI Gateway</div>
-  <div class="tagline">Groq + LLM7 双上游反向代理 · 自动降级 · OpenAI 协议兼容</div>
+  <div class="tagline">Groq · LLM7 · Kilo · NVIDIA 四上游反向代理 · 自动降级 · OpenAI 协议兼容</div>
   ${guard}
 </header>
 
@@ -332,6 +396,8 @@ function landingPage(origin, env) {
     <tr><th>上游</th><th>状态</th><th>说明</th></tr>
     <tr><td><b>Groq</b></td><td>${groqState}</td><td>速度快，有地区封锁风险</td></tr>
     <tr><td><b>LLM7.io</b></td><td>${llm7State}</td><td>无需注册即可用，永久兜底</td></tr>
+    <tr><td><b>Kilo Gateway</b></td><td>${kiloState}</td><td>免密钥，19+ 个 <code>:free</code> 模型</td></tr>
+    <tr><td><b>NVIDIA NIM</b></td><td>${nvidiaState}</td><td>100+ 开源模型，需 Key</td></tr>
   </table>
   <div class="meta">
     <span>调度顺序：<code>${s.order}</code></span>
@@ -348,6 +414,8 @@ function landingPage(origin, env) {
     <tr><td>GET</td><td><code>/v1/models</code></td><td>模型列表</td></tr>
     <tr><td>*</td><td><code>/groq/v1/*</code></td><td>强制走 Groq</td></tr>
     <tr><td>*</td><td><code>/llm7/v1/*</code></td><td>强制走 LLM7</td></tr>
+    <tr><td>*</td><td><code>/kilo/v1/*</code></td><td>强制走 Kilo</td></tr>
+    <tr><td>*</td><td><code>/nvidia/v1/*</code></td><td>强制走 NVIDIA</td></tr>
   </table>
   <div class="meta">
     <span>响应头 <code>X-Upstream-Provider</code> 告诉你实际由谁服务</span>
@@ -389,12 +457,14 @@ for chunk in resp:
 <div class="card">
   <h2>🧩 模型别名（自动按上游翻译）</h2>
   <table>
-    <tr><th>你填</th><th>Groq 实际</th><th>LLM7 实际</th></tr>
-    <tr><td><code>gpt-oss-120b</code></td><td><code>openai/gpt-oss-120b</code></td><td><code>gpt-oss</code></td></tr>
-    <tr><td><code>gpt-oss-20b</code></td><td><code>openai/gpt-oss-20b</code></td><td><code>gpt-oss:20b</code></td></tr>
-    <tr><td><code>qwen</code></td><td><code>qwen/qwen3.8-27b</code></td><td><code>qwen3-235b</code></td></tr>
+    <tr><th>你填</th><th>Groq</th><th>LLM7</th><th>Kilo</th><th>NVIDIA</th></tr>
+    <tr><td><code>gpt-oss-120b</code></td><td><code>openai/gpt-oss-120b</code></td><td><code>gpt-oss</code></td><td><code>kilo-auto/free</code></td><td><code>openai/gpt-oss-120b</code></td></tr>
+    <tr><td><code>gpt-oss-20b</code></td><td><code>openai/gpt-oss-20b</code></td><td><code>gpt-oss:20b</code></td><td><code>kilo-auto/free</code></td><td><code>openai/gpt-oss-20b</code></td></tr>
+    <tr><td><code>qwen</code></td><td><code>qwen/qwen3.8-27b</code></td><td><code>qwen3-235b</code></td><td><code>nemotron-3-super…:free</code></td><td><code>qwen/qwen3-235b-a22b</code></td></tr>
+    <tr><td><code>deepseek</code></td><td>—</td><td>—</td><td><code>kilo-auto/free</code></td><td><code>deepseek-ai/deepseek-v4.1-flash</code></td></tr>
   </table>
-  <div class="warn">Groq 的 <code>llama-3.3-70b-versatile</code>、<code>llama-3.1-8b-instant</code> 已于 2026-08-16 对免费档下架，填了会 404。</div>
+  <div class="warn">Groq 的 <code>llama-3.3-70b-versatile</code>、<code>llama-3.1-8b-instant</code> 已于 2026-08-16 对免费档下架，填了会 404。<br>
+  Kilo 免费档只认带 <code>:free</code> 后缀的 ID，其他模型名会自动回退到 <code>kilo-auto/free</code>。</div>
 </div>
 `;
 
@@ -432,6 +502,8 @@ function testPage(origin, env) {
         <option value="/v1/chat/completions">/v1（自动选上游）</option>
         <option value="/groq/v1/chat/completions">/groq/v1（强制 Groq）</option>
         <option value="/llm7/v1/chat/completions">/llm7/v1（强制 LLM7）</option>
+        <option value="/kilo/v1/chat/completions">/kilo/v1（强制 Kilo）</option>
+        <option value="/nvidia/v1/chat/completions">/nvidia/v1（强制 NVIDIA）</option>
       </select>
     </div>
     <div class="field" style="margin-bottom:0">
@@ -562,7 +634,6 @@ document.getElementById('msg').addEventListener('keydown', function(e){
   return html.replace('</body>', `<script>${script}</script></body>`);
 }
 
-
 // ---------- 入口 ----------
 
 export default {
@@ -585,23 +656,24 @@ export default {
       });
     }
 
-    if (url.pathname === '/healthz' || url.pathname === '/') {
+    if (url.pathname === '/healthz') {
       const info = await healthAll(env);
       return new Response(JSON.stringify(info, null, 2), {
         headers: corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' })
       });
     }
 
+    // 强制指定上游: /<provider>/v1/*
     let forced = null;
     let path = url.pathname;
-    if (path.startsWith('/groq/v1/')) {
-      forced = 'groq'; path = path.slice('/groq/v1'.length);
-    } else if (path.startsWith('/llm7/v1/')) {
-      forced = 'llm7'; path = path.slice('/llm7/v1'.length);
+    const pfx = path.match(/^\/(groq|llm7|kilo|nvidia)\/v1(\/.*)?$/);
+    if (pfx) {
+      forced = pfx[1];
+      path = pfx[2] || '/';
     } else if (path.startsWith('/v1/')) {
       path = path.slice('/v1'.length);
     } else {
-      return jsonError('路径不支持。可用：GET /healthz、/v1/*、/groq/v1/*、/llm7/v1/*', 404, 'not_found');
+      return jsonError('路径不支持。可用: GET /healthz、/v1/*、/groq/v1/*、/llm7/v1/*、/kilo/v1/*、/nvidia/v1/*', 404, 'not_found');
     }
 
     if (!checkAccess(request, env)) return jsonError('Unauthorized：ACCESS_KEY 不正确', 401, 'auth_error');
